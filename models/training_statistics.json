@@ -1,0 +1,38 @@
+{
+  "total_trained": 84,
+  "total_skipped": 7041,
+  "pairs_processed": 6,
+  "pair_details": {
+    "EUR_USD": {
+      "trained": 17,
+      "skipped": 1373,
+      "total_events": 1390
+    },
+    "GBP_USD": {
+      "trained": 14,
+      "skipped": 1326,
+      "total_events": 1340
+    },
+    "USD_JPY": {
+      "trained": 14,
+      "skipped": 1108,
+      "total_events": 1122
+    },
+    "USD_CAD": {
+      "trained": 12,
+      "skipped": 1150,
+      "total_events": 1162
+    },
+    "AUD_USD": {
+      "trained": 14,
+      "skipped": 1089,
+      "total_events": 1103
+    },
+    "NZD_USD": {
+      "trained": 13,
+      "skipped": 995,
+      "total_events": 1008
+    }
+  },
+  "timestamp": "2025-12-13T12:28:09.754080"
+}

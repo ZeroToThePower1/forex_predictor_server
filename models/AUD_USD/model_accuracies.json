@@ -1,0 +1,16 @@
+{
+  "AUD_Home Loans (MoM)": 0.5,
+  "AUD_Retail Sales (MoM)": 0.375,
+  "AUD_Building Approvals (MoM)": 0.5714285714285714,
+  "USD_Continuing Jobless Claims": 0.44594594594594594,
+  "USD_Initial Jobless Claims": 0.52,
+  "USD_Crude Oil Inventories": 0.41333333333333333,
+  "USD_Cushing Crude Oil Inventories": 0.631578947368421,
+  "USD_U.S. Baker Hughes Oil Rig Count": 0.6,
+  "USD_API Weekly Crude Oil Stock": 0.38461538461538464,
+  "USD_Fed Interest Rate Decision": 0.4166666666666667,
+  "USD_Atlanta Fed GDPNow  (Q4)": 0.45454545454545453,
+  "USD_Atlanta Fed GDPNow  (Q1)": 0.7,
+  "USD_Atlanta Fed GDPNow  (Q2)": 0.5,
+  "USD_Atlanta Fed GDPNow  (Q3)": 0.3333333333333333
+}

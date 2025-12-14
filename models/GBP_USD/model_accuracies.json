@@ -1,0 +1,16 @@
+{
+  "GBP_GDP (MoM)": 0.3333333333333333,
+  "GBP_Monthly GDP 3M/3M Change": 0.75,
+  "GBP_CPIH (YoY)": 0.5454545454545454,
+  "USD_Continuing Jobless Claims": 0.4594594594594595,
+  "USD_Initial Jobless Claims": 0.4533333333333333,
+  "USD_Crude Oil Inventories": 0.48,
+  "USD_Cushing Crude Oil Inventories": 0.2631578947368421,
+  "USD_U.S. Baker Hughes Oil Rig Count": 0.6,
+  "USD_API Weekly Crude Oil Stock": 0.5692307692307692,
+  "USD_Fed Interest Rate Decision": 0.4166666666666667,
+  "USD_Atlanta Fed GDPNow  (Q4)": 0.36363636363636365,
+  "USD_Atlanta Fed GDPNow  (Q1)": 0.4,
+  "USD_Atlanta Fed GDPNow  (Q2)": 0.6,
+  "USD_Atlanta Fed GDPNow  (Q3)": 0.4444444444444444
+}
