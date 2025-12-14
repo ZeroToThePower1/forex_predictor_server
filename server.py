@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+import traceback
 
 # ==================================================
 # LOAD ENVIRONMENT VARIABLES - DO THIS FIRST!
@@ -222,13 +223,35 @@ def load_models_for_pair(pair_name: str):
         "total_models": len(event_models)
     }
 
-def predict_with_model(model, features):
+def predict_with_model(model, features, feature_names=None):
     """Make prediction with xgb.Booster model"""
-    dmatrix = xgb.DMatrix(np.array([features]))
-    prediction = model.predict(dmatrix)[0]
-    prob = float(prediction)
-    pred_class = 1 if prob >= 0.5 else 0
-    return pred_class, prob
+    # Try with cleaned feature names (what your models expect)
+    if feature_names is None:
+        feature_names = ['actual_clean', 'forecast_clean', 'previous_clean']
+    
+    try:
+        dmatrix = xgb.DMatrix(
+            np.array([features]),
+            feature_names=feature_names
+        )
+        
+        prediction = model.predict(dmatrix)[0]
+        prob = float(prediction)
+        pred_class = 1 if prob >= 0.5 else 0
+        
+        return pred_class, prob
+        
+    except Exception as e:
+        # If cleaned names don't work, try without feature names
+        print(f"⚠ Warning: Feature name error, trying without names: {e}")
+        try:
+            dmatrix = xgb.DMatrix(np.array([features]))
+            prediction = model.predict(dmatrix)[0]
+            prob = float(prediction)
+            pred_class = 1 if prob >= 0.5 else 0
+            return pred_class, prob
+        except Exception as e2:
+            raise Exception(f"Prediction failed: {e2}")
 
 def save_prediction_to_db(prediction_type: str, data: dict):
     """Save prediction to database"""
@@ -430,12 +453,25 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# ==================================================
+# CORS MIDDLEWARE - FIXED FOR GITHUB PAGES
+# ==================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://zerotothepower1.github.io",  # Your GitHub Pages
+        "http://localhost:8000",
+        "http://127.0.0.1:8000", 
+        "http://localhost:3000",
+        "http://localhost:5500",
+        "https://forex-predictor-server.onrender.com",
+        "*"  # Fallback for testing
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
 # ==================================================
@@ -485,6 +521,7 @@ async def switch_pair(request: SwitchPairRequest):
             "details": result
         }
     except Exception as e:
+        print(f"❌ Error switching pair: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to switch pair: {str(e)}")
 
 @app.get("/pairs/{pair_name}/models")
@@ -533,68 +570,106 @@ async def get_events():
 @app.post("/predict/event")
 async def predict_event(data: EventInput):
     """Predict single event direction"""
-    # Try different naming patterns
-    possible_names = [
-        data.event,
-        f"{current_pair}_{data.event}",
-        data.event.replace(f"{current_pair}_", "")
-    ]
-    
-    model_to_use = None
-    for name in possible_names:
-        if name in event_models:
-            model_to_use = name
-            break
-    
-    if not model_to_use:
-        matching = [m for m in event_models.keys() if data.event in m]
-        if matching:
-            model_to_use = matching[0]
+    try:
+        print(f"\n🎯 PREDICTION REQUEST RECEIVED")
+        print(f"📊 Event: {data.event}")
+        print(f"📈 Inputs: actual={data.actual}, forecast={data.forecast}, previous={data.previous}")
+        print(f"📍 Current pair: {current_pair}")
+        print(f"📦 Total models loaded: {len(event_models)}")
+        
+        # Try different naming patterns
+        possible_names = [
+            data.event,
+            f"{current_pair}_{data.event}",
+            data.event.replace(f"{current_pair}_", "")
+        ]
+        
+        print(f"🔍 Looking for model with names: {possible_names}")
+        
+        model_to_use = None
+        for name in possible_names:
+            if name in event_models:
+                model_to_use = name
+                print(f"✅ Found exact match: {model_to_use}")
+                break
+        
+        if not model_to_use:
+            # Try to find any model containing the event name
+            matching = [m for m in event_models.keys() if data.event in m]
+            print(f"🔍 Fuzzy matching results: {matching}")
+            if matching:
+                model_to_use = matching[0]
+                print(f"✅ Fuzzy matched model: {model_to_use}")
+            else:
+                error_msg = f"Event model '{data.event}' not found."
+                print(f"❌ {error_msg}")
+                print(f"📋 Available models: {list(event_models.keys())[:10]}...")  # First 10
+                raise HTTPException(status_code=404, detail=error_msg)
+        
+        model = event_models[model_to_use]
+        features = [data.actual, data.forecast, data.previous]
+        print(f"🔢 Features array: {features}")
+        
+        # Make prediction - TRY WITH CLEANED FEATURE NAMES FIRST
+        try:
+            pred, prob = predict_with_model(
+                model, 
+                features,
+                feature_names=['actual_clean', 'forecast_clean', 'previous_clean']
+            )
+            print(f"✅ Prediction successful with cleaned feature names")
+        except Exception as e:
+            print(f"⚠ Cleaned names failed, trying without feature names: {e}")
+            pred, prob = predict_with_model(model, features, feature_names=None)
+        
+        print(f"🎯 Prediction result: {pred} ({'UP' if pred == 1 else 'DOWN'}), Probability: {prob:.3f}")
+        
+        prediction_label = "UP" if pred == 1 else "DOWN"
+        confidence_percent = round(prob * 100, 2)
+        model_accuracy = model_accuracies.get(model_to_use, 0.5)
+        
+        if prob > 0.8:
+            signal_strength = "STRONG"
+        elif prob > 0.7:
+            signal_strength = "MODERATE"
+        elif prob > 0.6:
+            signal_strength = "WEAK"
         else:
-            raise HTTPException(status_code=404, detail=f"Event model '{data.event}' not found")
-    
-    model = event_models[model_to_use]
-    features = [data.actual, data.forecast, data.previous]
-    pred, prob = predict_with_model(model, features)
-    
-    prediction_label = "UP" if pred == 1 else "DOWN"
-    confidence_percent = round(prob * 100, 2)
-    model_accuracy = model_accuracies.get(model_to_use, 0.5)
-    
-    if prob > 0.8:
-        signal_strength = "STRONG"
-    elif prob > 0.7:
-        signal_strength = "MODERATE"
-    elif prob > 0.6:
-        signal_strength = "WEAK"
-    else:
-        signal_strength = "VERY WEAK"
-    
-    signal = f"{signal_strength} {'BUY' if pred == 1 else 'SELL'}"
-    
-    response = {
-        "event": data.event,
-        "full_model_name": model_to_use,
-        "pair_name": current_pair,
-        "prediction": int(pred),
-        "prediction_label": prediction_label,
-        "confidence": prob,
-        "confidence_percent": confidence_percent,
-        "model_accuracy": model_accuracy,
-        "signal": signal,
-        "signal_strength": signal_strength,
-        "inputs": {
-            "actual": data.actual,
-            "forecast": data.forecast,
-            "previous": data.previous
-        },
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    prediction_id = save_prediction_to_db("event", response)
-    response["prediction_id"] = prediction_id
-    
-    return response
+            signal_strength = "VERY WEAK"
+        
+        signal = f"{signal_strength} {'BUY' if pred == 1 else 'SELL'}"
+        
+        response = {
+            "event": data.event,
+            "full_model_name": model_to_use,
+            "pair_name": current_pair,
+            "prediction": int(pred),
+            "prediction_label": prediction_label,
+            "confidence": float(prob),
+            "confidence_percent": confidence_percent,
+            "model_accuracy": model_accuracy,
+            "signal": signal,
+            "signal_strength": signal_strength,
+            "inputs": {
+                "actual": data.actual,
+                "forecast": data.forecast,
+                "previous": data.previous
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        prediction_id = save_prediction_to_db("event", response)
+        response["prediction_id"] = prediction_id
+        
+        print(f"✅ Prediction saved to DB with ID: {prediction_id}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"🔥 CRITICAL ERROR in predict_event: {str(e)}")
+        print(f"🔥 Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/predict/ensemble")
 async def predict_ensemble(request: EnsembleRequest):
@@ -603,6 +678,11 @@ async def predict_ensemble(request: EnsembleRequest):
     
     individual_results = []
     calculation_steps = []
+    
+    print(f"\n🎯 ENSEMBLE PREDICTION REQUEST")
+    print(f"📊 Method: {request.method}")
+    print(f"📍 Pair: {pair_name}")
+    print(f"📈 Number of events: {len(request.events)}")
     
     # Get predictions for each event
     for event_input in request.events:
@@ -625,11 +705,21 @@ async def predict_ensemble(request: EnsembleRequest):
                 if matching:
                     model_to_use = matching[0]
                 else:
+                    print(f"⚠ Skipping event {event_input.event}: model not found")
                     continue  # Skip events without models
             
             model = event_models[model_to_use]
             features = [event_input.actual, event_input.forecast, event_input.previous]
-            pred, prob = predict_with_model(model, features)
+            
+            # Make prediction
+            try:
+                pred, prob = predict_with_model(
+                    model, 
+                    features,
+                    feature_names=['actual_clean', 'forecast_clean', 'previous_clean']
+                )
+            except:
+                pred, prob = predict_with_model(model, features, feature_names=None)
             
             # Convert DOWN predictions to UP probabilities for consistent calculation
             up_probability = prob if pred == 1 else (1 - prob)
@@ -650,27 +740,35 @@ async def predict_ensemble(request: EnsembleRequest):
                 "up_probability": up_probability
             })
             
+            print(f"  ✅ {event_input.event}: {'UP' if pred == 1 else 'DOWN'} ({prob:.3f})")
+            
         except Exception as e:
-            print(f"Error predicting event {event_input.event}: {e}")
+            print(f"  ❌ Error predicting event {event_input.event}: {e}")
             continue
     
     if not individual_results:
         raise HTTPException(status_code=400, detail="No valid event predictions")
+    
+    print(f"📊 Valid predictions: {len(individual_results)}/{len(request.events)}")
     
     # Apply ensemble method
     if request.method == "weighted":
         # Weight by model accuracy
         total_weight = sum(r["model_accuracy"] for r in individual_results)
         up_probability = sum(r["up_probability"] * r["model_accuracy"] for r in individual_results) / total_weight
+        method_used = "weighted_average"
     elif request.method == "confident":
         # Use only high-confidence predictions
         confident_results = [r for r in individual_results if r["probability"] > 0.7 or r["probability"] < 0.3]
         if confident_results:
             up_probability = sum(r["up_probability"] for r in confident_results) / len(confident_results)
+            method_used = f"confident_voting ({len(confident_results)} events)"
         else:
             up_probability = sum(r["up_probability"] for r in individual_results) / len(individual_results)
+            method_used = "average (no confident events)"
     else:  # average
         up_probability = sum(r["up_probability"] for r in individual_results) / len(individual_results)
+        method_used = "simple_average"
     
     down_probability = 1 - up_probability
     final_prediction = 1 if up_probability >= 0.5 else 0
@@ -698,7 +796,7 @@ async def predict_ensemble(request: EnsembleRequest):
         "down_probability": down_probability,
         "signal": signal,
         "signal_strength": signal_strength,
-        "method": request.method,
+        "method": method_used,
         "individual_predictions": individual_results,
         "calculation_steps": calculation_steps,
         "event_count": len(individual_results),
@@ -708,6 +806,9 @@ async def predict_ensemble(request: EnsembleRequest):
     ensemble_id = save_ensemble_to_db(response)
     response["ensemble_id"] = ensemble_id
     
+    print(f"🎯 Ensemble result: {response['prediction_label']} ({final_confidence:.3f})")
+    print(f"📊 Method: {method_used}")
+    
     return response
 
 @app.get("/predictions/history")
@@ -716,22 +817,35 @@ async def get_prediction_history_endpoint(
     limit: int = Query(50, description="Number of records to return")
 ):
     """Get prediction history"""
-    if type == "event":
-        predictions = get_prediction_history("event", limit)
-        return {"predictions": predictions}
-    elif type == "ensemble":
-        ensembles = get_ensemble_history(limit)
-        return {"predictions": ensembles}
-    else:
-        # Return all predictions
-        events = get_prediction_history(None, limit)
-        return {"predictions": events}
+    try:
+        if type == "event":
+            predictions = get_prediction_history("event", limit)
+            return {"predictions": predictions}
+        elif type == "ensemble":
+            ensembles = get_ensemble_history(limit)
+            return {"predictions": ensembles}
+        else:
+            # Return recent predictions (mixed)
+            events = get_prediction_history(None, limit)
+            return {"predictions": events}
+    except Exception as e:
+        print(f"❌ Error getting history: {e}")
+        return {"predictions": []}
 
 @app.get("/performance/stats")
 async def get_performance_stats_endpoint():
     """Get performance statistics"""
-    stats = get_performance_stats()
-    return stats
+    try:
+        stats = get_performance_stats()
+        return stats
+    except Exception as e:
+        print(f"❌ Error getting stats: {e}")
+        return {
+            "total_predictions": 0,
+            "correct_predictions": 0,
+            "accuracy": 0,
+            "distribution": {}
+        }
 
 @app.get("/health")
 async def health_check():
@@ -748,6 +862,37 @@ async def health_check():
 async def custom_docs_redirect():
     """Redirect to Swagger docs"""
     return JSONResponse(content={"docs_url": "/docs"})
+
+# ==================================================
+# DEBUG ENDPOINTS
+# ==================================================
+@app.get("/debug/models")
+async def debug_models():
+    """Debug endpoint to see loaded models"""
+    return {
+        "current_pair": current_pair,
+        "total_models": len(event_models),
+        "models_by_pair": {pair: len(models) for pair, models in pair_models.items()},
+        "available_pairs": available_pairs,
+        "sample_models": list(event_models.keys())[:5] if event_models else []
+    }
+
+@app.get("/debug/test-prediction")
+async def debug_test_prediction():
+    """Test prediction with dummy data"""
+    test_data = EventInput(
+        event="GDP_Growth",  # Change to your actual event name
+        actual=1.5,
+        forecast=1.2,
+        previous=1.3
+    )
+    
+    try:
+        # Call the actual prediction function
+        result = await predict_event(test_data)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 # ==================================================
 # MAIN ENTRY POINT
