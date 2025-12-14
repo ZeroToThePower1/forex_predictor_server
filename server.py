@@ -4,10 +4,11 @@ import sqlite3
 import uvicorn
 import numpy as np
 import xgboost as xgb
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -36,7 +37,7 @@ pair_models = {}
 available_pairs = []
 
 # ==================================================
-# DATABASE SETUP (KEEP THIS THE SAME)
+# DATABASE SETUP
 # ==================================================
 def init_database():
     """Initialize SQLite database for storing predictions and history"""
@@ -101,7 +102,7 @@ def init_database():
     print(f"✅ Database initialized at {DATABASE_PATH}")
 
 # ==================================================
-# MODEL INPUT FORMATS (KEEP THIS THE SAME)
+# MODEL INPUT FORMATS
 # ==================================================
 class EventInput(BaseModel):
     event: str
@@ -123,7 +124,7 @@ class SwitchPairRequest(BaseModel):
     pair_name: str
 
 # ==================================================
-# HELPER FUNCTIONS - UPDATED FOR XGBOOST 2.0
+# HELPER FUNCTIONS
 # ==================================================
 def get_db_connection():
     """Get SQLite database connection"""
@@ -171,7 +172,7 @@ def load_models_for_pair(pair_name: str):
     for model in models_to_remove:
         del event_models[model]
     
-    # Load new models - USING xgb.Booster() instead of XGBClassifier()
+    # Load new models
     pair_events = []
     for file in os.listdir(pair_dir):
         if file.endswith(".json") and not file.endswith("_accuracies.json"):
@@ -179,7 +180,6 @@ def load_models_for_pair(pair_name: str):
             model_full_name = f"{pair_name}_{model_base_name}"
             
             try:
-                # CHANGED: Use xgb.Booster() for XGBoost 2.0
                 model = xgb.Booster()
                 model.load_model(os.path.join(pair_dir, file))
                 event_models[model_full_name] = model
@@ -223,19 +223,11 @@ def load_models_for_pair(pair_name: str):
     }
 
 def predict_with_model(model, features):
-    """Make prediction with xgb.Booster model (XGBoost 2.0)"""
-    # Convert to DMatrix (required by xgb.Booster)
+    """Make prediction with xgb.Booster model"""
     dmatrix = xgb.DMatrix(np.array([features]))
-    
-    # Get prediction probability
     prediction = model.predict(dmatrix)[0]
-    
-    # XGBoost returns probability for class 1
     prob = float(prediction)
-    
-    # Convert to binary prediction (0 or 1)
     pred_class = 1 if prob >= 0.5 else 0
-    
     return pred_class, prob
 
 def save_prediction_to_db(prediction_type: str, data: dict):
@@ -297,8 +289,109 @@ def save_ensemble_to_db(data: dict):
     
     return ensemble_id
 
+def get_prediction_history(prediction_type: str = None, limit: int = 50):
+    """Get prediction history from database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    query = '''
+        SELECT id, prediction_type, pair_name, event_name, prediction, 
+               prediction_label, confidence, signal, created_at
+        FROM predictions
+    '''
+    params = []
+    
+    if prediction_type:
+        query += ' WHERE prediction_type = ?'
+        params.append(prediction_type)
+    
+    query += ' ORDER BY created_at DESC LIMIT ?'
+    params.append(limit)
+    
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    predictions = []
+    for row in rows:
+        predictions.append({
+            "id": row["id"],
+            "prediction_type": row["prediction_type"],
+            "pair_name": row["pair_name"],
+            "event_name": row["event_name"],
+            "prediction": row["prediction"],
+            "prediction_label": row["prediction_label"],
+            "confidence": row["confidence"],
+            "signal": row["signal"],
+            "created_at": row["created_at"]
+        })
+    
+    return predictions
+
+def get_ensemble_history(limit: int = 50):
+    """Get ensemble prediction history from database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT id, pair_name, prediction, prediction_label, confidence, 
+               up_probability, down_probability, signal, method, event_count, created_at
+        FROM ensemble_predictions
+        ORDER BY created_at DESC LIMIT ?
+    ''', (limit,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    ensembles = []
+    for row in rows:
+        ensembles.append({
+            "id": row["id"],
+            "pair_name": row["pair_name"],
+            "prediction": row["prediction"],
+            "prediction_label": row["prediction_label"],
+            "confidence": row["confidence"],
+            "up_probability": row["up_probability"],
+            "down_probability": row["down_probability"],
+            "signal": row["signal"],
+            "method": row["method"],
+            "event_count": row["event_count"],
+            "created_at": row["created_at"]
+        })
+    
+    return ensembles
+
+def get_performance_stats():
+    """Get performance statistics from database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Total predictions
+    cursor.execute('SELECT COUNT(*) as total FROM predictions')
+    total = cursor.fetchone()["total"]
+    
+    # Total correct predictions (where actual_result is set and is_correct = 1)
+    cursor.execute('SELECT COUNT(*) as correct FROM predictions WHERE is_correct = 1')
+    correct = cursor.fetchone()["correct"]
+    
+    # Accuracy
+    accuracy = correct / total if total > 0 else 0
+    
+    # Distribution
+    cursor.execute('SELECT prediction_label, COUNT(*) as count FROM predictions GROUP BY prediction_label')
+    distribution = {row["prediction_label"]: row["count"] for row in cursor.fetchall()}
+    
+    conn.close()
+    
+    return {
+        "total_predictions": total,
+        "correct_predictions": correct,
+        "accuracy": accuracy,
+        "distribution": distribution
+    }
+
 # ==================================================
-# FASTAPI APP WITH CORS (KEEP THIS THE SAME)
+# FASTAPI APP
 # ==================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -346,12 +439,24 @@ app.add_middleware(
 )
 
 # ==================================================
-# ROUTES - UPDATED FOR XGBOOST 2.0
+# ROUTES
 # ==================================================
 
-# ---------- PAIR MANAGEMENT (KEEP SAME) ----------
+@app.get("/")
+async def root():
+    """Root endpoint - API status"""
+    return {
+        "message": "Forex Predictor API",
+        "version": "2.0",
+        "status": "online",
+        "current_pair": current_pair,
+        "models_loaded": len(event_models),
+        "available_pairs": len(available_pairs),
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.get("/pairs")
-def get_available_pairs():
+async def get_available_pairs():
     """Get list of all available currency pairs"""
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -367,7 +472,7 @@ def get_available_pairs():
     }
 
 @app.post("/pairs/switch")
-def switch_pair(request: SwitchPairRequest):
+async def switch_pair(request: SwitchPairRequest):
     """Switch to a different currency pair"""
     if request.pair_name not in available_pairs:
         raise HTTPException(status_code=404, detail=f"Pair '{request.pair_name}' not found")
@@ -383,7 +488,7 @@ def switch_pair(request: SwitchPairRequest):
         raise HTTPException(status_code=500, detail=f"Failed to switch pair: {str(e)}")
 
 @app.get("/pairs/{pair_name}/models")
-def get_pair_models(pair_name: str):
+async def get_pair_models(pair_name: str):
     """Get all models available for a specific pair"""
     if pair_name not in available_pairs:
         raise HTTPException(status_code=404, detail=f"Pair '{pair_name}' not found")
@@ -407,15 +512,32 @@ def get_pair_models(pair_name: str):
         "count": len(models)
     }
 
-# ---------- EVENT PREDICTION - UPDATED ----------
+@app.get("/events")
+async def get_events():
+    """Get all available events for current pair"""
+    models = []
+    for model_name in pair_models.get(current_pair, []):
+        base_name = model_name.replace(f"{current_pair}_", "")
+        models.append({
+            "name": base_name,
+            "full_name": model_name,
+            "accuracy": model_accuracies.get(model_name, 0.5)
+        })
+    
+    return {
+        "pair": current_pair,
+        "events": sorted(models, key=lambda x: x["name"]),
+        "count": len(models)
+    }
+
 @app.post("/predict/event")
-def predict_event(data: EventInput):
+async def predict_event(data: EventInput):
     """Predict single event direction"""
     # Try different naming patterns
     possible_names = [
-        data.event,  # Exact match
-        f"{current_pair}_{data.event}",  # With current pair prefix
-        data.event.replace(f"{current_pair}_", "")  # Without pair prefix if present
+        data.event,
+        f"{current_pair}_{data.event}",
+        data.event.replace(f"{current_pair}_", "")
     ]
     
     model_to_use = None
@@ -425,7 +547,6 @@ def predict_event(data: EventInput):
             break
     
     if not model_to_use:
-        # Try to find any model containing the event name
         matching = [m for m in event_models.keys() if data.event in m]
         if matching:
             model_to_use = matching[0]
@@ -433,17 +554,13 @@ def predict_event(data: EventInput):
             raise HTTPException(status_code=404, detail=f"Event model '{data.event}' not found")
     
     model = event_models[model_to_use]
-    
-    # Make prediction - USING UPDATED FUNCTION
     features = [data.actual, data.forecast, data.previous]
     pred, prob = predict_with_model(model, features)
     
-    # Calculate derived values
     prediction_label = "UP" if pred == 1 else "DOWN"
     confidence_percent = round(prob * 100, 2)
     model_accuracy = model_accuracies.get(model_to_use, 0.5)
     
-    # Determine signal strength
     if prob > 0.8:
         signal_strength = "STRONG"
     elif prob > 0.7:
@@ -455,7 +572,6 @@ def predict_event(data: EventInput):
     
     signal = f"{signal_strength} {'BUY' if pred == 1 else 'SELL'}"
     
-    # Prepare response
     response = {
         "event": data.event,
         "full_model_name": model_to_use,
@@ -475,19 +591,163 @@ def predict_event(data: EventInput):
         "timestamp": datetime.now().isoformat()
     }
     
-    # Save to database
     prediction_id = save_prediction_to_db("event", response)
     response["prediction_id"] = prediction_id
     
     return response
 
-# ---------- ENSEMBLE PREDICTION (KEEP SAME) ----------
-# ... (KEEP YOUR EXISTING ENSEMBLE CODE, IT SHOULD WORK) ...
+@app.post("/predict/ensemble")
+async def predict_ensemble(request: EnsembleRequest):
+    """Make ensemble prediction from multiple events"""
+    pair_name = request.pair_name or current_pair
+    
+    individual_results = []
+    calculation_steps = []
+    
+    # Get predictions for each event
+    for event_input in request.events:
+        try:
+            # Try different naming patterns
+            possible_names = [
+                event_input.event,
+                f"{pair_name}_{event_input.event}",
+                event_input.event.replace(f"{pair_name}_", "")
+            ]
+            
+            model_to_use = None
+            for name in possible_names:
+                if name in event_models:
+                    model_to_use = name
+                    break
+            
+            if not model_to_use:
+                matching = [m for m in event_models.keys() if event_input.event in m]
+                if matching:
+                    model_to_use = matching[0]
+                else:
+                    continue  # Skip events without models
+            
+            model = event_models[model_to_use]
+            features = [event_input.actual, event_input.forecast, event_input.previous]
+            pred, prob = predict_with_model(model, features)
+            
+            # Convert DOWN predictions to UP probabilities for consistent calculation
+            up_probability = prob if pred == 1 else (1 - prob)
+            
+            individual_results.append({
+                "event": event_input.event,
+                "prediction": int(pred),
+                "prediction_label": "UP" if pred == 1 else "DOWN",
+                "probability": prob,
+                "up_probability": up_probability,
+                "model_accuracy": model_accuracies.get(model_to_use, 0.5)
+            })
+            
+            calculation_steps.append({
+                "event": event_input.event,
+                "original_prediction": "UP" if pred == 1 else "DOWN",
+                "original_probability": prob,
+                "up_probability": up_probability
+            })
+            
+        except Exception as e:
+            print(f"Error predicting event {event_input.event}: {e}")
+            continue
+    
+    if not individual_results:
+        raise HTTPException(status_code=400, detail="No valid event predictions")
+    
+    # Apply ensemble method
+    if request.method == "weighted":
+        # Weight by model accuracy
+        total_weight = sum(r["model_accuracy"] for r in individual_results)
+        up_probability = sum(r["up_probability"] * r["model_accuracy"] for r in individual_results) / total_weight
+    elif request.method == "confident":
+        # Use only high-confidence predictions
+        confident_results = [r for r in individual_results if r["probability"] > 0.7 or r["probability"] < 0.3]
+        if confident_results:
+            up_probability = sum(r["up_probability"] for r in confident_results) / len(confident_results)
+        else:
+            up_probability = sum(r["up_probability"] for r in individual_results) / len(individual_results)
+    else:  # average
+        up_probability = sum(r["up_probability"] for r in individual_results) / len(individual_results)
+    
+    down_probability = 1 - up_probability
+    final_prediction = 1 if up_probability >= 0.5 else 0
+    final_confidence = up_probability if final_prediction == 1 else down_probability
+    
+    # Determine signal strength
+    if final_confidence > 0.8:
+        signal_strength = "STRONG"
+    elif final_confidence > 0.7:
+        signal_strength = "MODERATE"
+    elif final_confidence > 0.6:
+        signal_strength = "WEAK"
+    else:
+        signal_strength = "VERY WEAK"
+    
+    signal = f"{signal_strength} {'BUY' if final_prediction == 1 else 'SELL'}"
+    
+    response = {
+        "pair_name": pair_name,
+        "prediction": int(final_prediction),
+        "prediction_label": "UP" if final_prediction == 1 else "DOWN",
+        "confidence": final_confidence,
+        "confidence_percent": round(final_confidence * 100, 2),
+        "up_probability": up_probability,
+        "down_probability": down_probability,
+        "signal": signal,
+        "signal_strength": signal_strength,
+        "method": request.method,
+        "individual_predictions": individual_results,
+        "calculation_steps": calculation_steps,
+        "event_count": len(individual_results),
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    ensemble_id = save_ensemble_to_db(response)
+    response["ensemble_id"] = ensemble_id
+    
+    return response
 
-# ==================================================
-# REST OF YOUR ROUTES (KEEP THEM AS THEY ARE)
-# ==================================================
-# ... (COPY ALL YOUR OTHER ROUTES FROM BEFORE - THEY DON'T NEED TO CHANGE) ...
+@app.get("/predictions/history")
+async def get_prediction_history_endpoint(
+    type: Optional[str] = Query(None, description="Type: 'event' or 'ensemble'"),
+    limit: int = Query(50, description="Number of records to return")
+):
+    """Get prediction history"""
+    if type == "event":
+        predictions = get_prediction_history("event", limit)
+        return {"predictions": predictions}
+    elif type == "ensemble":
+        ensembles = get_ensemble_history(limit)
+        return {"predictions": ensembles}
+    else:
+        # Return all predictions
+        events = get_prediction_history(None, limit)
+        return {"predictions": events}
+
+@app.get("/performance/stats")
+async def get_performance_stats_endpoint():
+    """Get performance statistics"""
+    stats = get_performance_stats()
+    return stats
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "current_pair": current_pair,
+        "models_loaded": len(event_models),
+        "database": "connected" if os.path.exists(DATABASE_PATH) else "missing",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/docs")
+async def custom_docs_redirect():
+    """Redirect to Swagger docs"""
+    return JSONResponse(content={"docs_url": "/docs"})
 
 # ==================================================
 # MAIN ENTRY POINT
@@ -507,6 +767,6 @@ if __name__ == "__main__":
         "server:app",
         host="0.0.0.0",
         port=PORT,
-        reload=True,
+        reload=False,
         log_level="info"
     )
